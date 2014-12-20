@@ -1,4 +1,6 @@
 Makefile
 syngo
+syngo.sublime*
+.tags*
 tags*
 test/*
