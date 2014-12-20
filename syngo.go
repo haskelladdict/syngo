@@ -21,8 +21,9 @@ const numSyncers = 2
 // fileInfo keeps track of the information needed to determine if a file needs
 // to be resynced or not
 type fileInfo struct {
-	info os.FileInfo
-	path string
+	info     os.FileInfo
+	path     string
+	linkPath string // target path for symbolic links
 }
 
 func main() {
@@ -75,6 +76,8 @@ func main() {
 
 // syncFiles processes a list of files which need to be synced and processes
 // them one by one
+// NOTE: Currently we only deal with regular files and symlinks, all others are
+// skipped
 func syncFiles(src, tgt string, fileList <-chan fileInfo, syncDone *sync.WaitGroup) {
 	var numBytes int64
 	var fileCount int64
@@ -82,42 +85,37 @@ func syncFiles(src, tgt string, fileList <-chan fileInfo, syncDone *sync.WaitGro
 		srcPath := filepath.Join(src, file.path)
 		tgtPath := filepath.Join(tgt, file.path)
 
-		fmt.Println(srcPath)
-		s, err := os.Open(srcPath)
-		if err != nil {
-			log.Printf("failed to open file %s for syncing: %s\n", srcPath, err)
+		fileMode := file.info.Mode()
+		if fileMode.IsRegular() {
+			n, err := syncFile(srcPath, tgtPath, file)
+			if err != nil {
+				log.Print(err)
+				continue
+			}
+			numBytes += n
+
+		} else if fileMode&os.ModeSymlink != 0 {
+			if _, err := os.Lstat(tgtPath); err == nil {
+				if err := os.Remove(tgtPath); err != nil {
+					log.Printf("failed to remove stale symbolic link %s: %s\n", tgtPath, err)
+					continue
+				}
+			}
+
+			linkPath := file.linkPath
+			if err := os.Symlink(linkPath, tgtPath); err != nil {
+				log.Printf("failed to create symbolic link %s to %s: %s\n", tgtPath,
+					linkPath, err)
+				continue
+			}
+
+		} else {
 			continue
 		}
-
-		t, err := os.Create(tgtPath)
-		if err != nil {
-			log.Printf("failed to create file %s for syncing: %s\n", tgtPath, err)
-			continue
-		}
-
-		n, err := io.Copy(t, s)
-		if err != nil {
-			log.Print("failed to copy file %s to %s during syncing: %s\n", srcPath,
-				tgtPath, err)
-		}
-
-		// sync file properties between source and target
-		err = t.Chmod(file.info.Mode())
-		if err != nil {
-			log.Print("failed to change file mode for %s: %s", tgtPath, err)
-		}
-
-		err = os.Chtimes(tgtPath, file.info.ModTime(), file.info.ModTime())
-		if err != nil {
-			log.Print("failed to change file modification time for %s: %s", tgtPath, err)
-		}
-
-		numBytes += n
 		fileCount++
 	}
 	fmt.Printf("copied %d files and %d bytes\n", fileCount, numBytes)
 	syncDone.Done()
-
 }
 
 // syncDirLayout syncs the target directory layout with the provided source layout.
@@ -141,22 +139,40 @@ func syncDirLayout(tgt string, dirList <-chan fileInfo, done *sync.WaitGroup) {
 // entry needs to be synced or not.
 func checkTgt(tgt string, fileList <-chan fileInfo, updateList chan<- fileInfo,
 	done *sync.WaitGroup) {
-	for src := range fileList {
-		path := filepath.Join(tgt, src.path)
+	for srcFile := range fileList {
+
+		path := filepath.Join(tgt, srcFile.path)
 		info, err := os.Lstat(path)
 		if err != nil {
 			if os.IsNotExist(err) {
-				updateList <- src
+				updateList <- srcFile
 			} else {
-				log.Print(err)
+				log.Print("*****", err)
 			}
 			continue
 		}
 
-		if (src.info.Size() != info.Size()) ||
-			(src.info.Mode() != info.Mode()) ||
-			(src.info.ModTime() != info.ModTime()) {
-			updateList <- src
+		if srcFile.info.Mode()&os.ModeSymlink != 0 {
+			if info.Mode()&os.ModeSymlink != 0 {
+				// check that link points to the correct file
+				symp, err := filepath.EvalSymlinks(path)
+				if err != nil {
+					log.Print(err)
+					continue
+				}
+				relSymPath := strings.TrimPrefix(symp, tgt+"/")
+				if relSymPath != srcFile.linkPath {
+					updateList <- srcFile
+				}
+			} else {
+				updateList <- srcFile
+			}
+		} else {
+			if (srcFile.info.Size() != info.Size()) ||
+				(srcFile.info.Mode() != info.Mode()) ||
+				(srcFile.info.ModTime() != info.ModTime()) {
+				updateList <- srcFile
+			}
 		}
 	}
 	done.Done()
@@ -193,9 +209,17 @@ func parseSrcFiles(src string, fileList chan<- fileInfo) {
 			return nil
 		}
 
-		relPath := strings.TrimPrefix(p, src)
+		relPath := strings.TrimPrefix(p, src+"/")
 		if !i.IsDir() {
-			fileList <- fileInfo{info: i, path: relPath}
+			var relSymPath string
+			if i.Mode()&os.ModeSymlink != 0 {
+				symp, err := filepath.EvalSymlinks(p)
+				if err != nil {
+					return nil
+				}
+				relSymPath = strings.TrimPrefix(symp, src+"/")
+			}
+			fileList <- fileInfo{info: i, path: relPath, linkPath: relSymPath}
 		}
 		return nil
 	})
@@ -232,4 +256,35 @@ func checkInput(src, dst string) error {
 	}
 
 	return nil
+}
+
+// syncFile synchronizes target and source and makes sure they have identical
+// permissions and timestamps
+func syncFile(srcPath, tgtPath string, file fileInfo) (int64, error) {
+	s, err := os.Open(srcPath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to open file %s for syncing: %s\n", srcPath, err)
+	}
+
+	t, err := os.Create(tgtPath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create file %s for syncing: %s\n", tgtPath, err)
+	}
+
+	n, err := io.Copy(t, s)
+	if err != nil {
+		log.Printf("failed to copy file %s to %s during syncing: %s\n", srcPath,
+			tgtPath, err)
+	}
+
+	// sync file properties between source and target
+	if err := os.Chtimes(tgtPath, file.info.ModTime(), file.info.ModTime()); err != nil {
+		log.Printf("failed to change file modification time for %s: %s\n", tgtPath, err)
+	}
+
+	if err := os.Chmod(tgtPath, file.info.Mode()); err != nil {
+		log.Printf("failed to change file mode for %s: %s\n", tgtPath, err)
+	}
+
+	return n, nil
 }
