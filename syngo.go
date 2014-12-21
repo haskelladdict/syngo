@@ -12,11 +12,19 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 )
 
 // hardcoded number of concurrent goroutine tasks (for now)
 const numCheckers = 3
 const numSyncers = 2
+
+// syncStats keeps a record of useful sync statistics (number of files,
+// amount of data, ...)
+type syncStats struct {
+	numFiles int64
+	numBytes int64
+}
 
 // fileInfo keeps track of the information needed to determine if a file needs
 // to be resynced or not
@@ -33,6 +41,9 @@ func main() {
 		fmt.Printf("incorrect number of command line arguments\n\n")
 		usage()
 	}
+
+	startTime := time.Now()
+
 	srcTree := path.Clean(strings.TrimSpace(os.Args[1]))
 	tgtTree := path.Clean(strings.TrimSpace(os.Args[2]))
 	if err := checkInput(srcTree, tgtTree); err != nil {
@@ -63,13 +74,23 @@ func main() {
 	}
 	go chanCloser(updateList, &done)
 
-	var syncDone sync.WaitGroup
-	syncDone.Add(numSyncers)
+	//var syncDone sync.WaitGroup
+	//syncDone.Add(numSyncers)
+	syncDone := make(chan syncStats)
 	for i := 0; i < numSyncers; i++ {
-		go syncFiles(srcTree, tgtTree, updateList, &syncDone)
+		go syncFiles(srcTree, tgtTree, updateList, syncDone)
 	}
-	syncDone.Wait()
 
+	var numFiles, numBytes int64
+	for i := 0; i < numSyncers; i++ {
+		d := <-syncDone
+		numFiles += d.numFiles
+		numBytes += d.numBytes
+	}
+	numMBytes := float64(numBytes) / 1024 / 1024
+	dur := time.Since(startTime).Seconds()
+	fmt.Printf("Synced %d files with %.5g MB in %.5g s (%.5g MB/s)\n", numFiles,
+		numMBytes, dur, numMBytes/dur)
 	fmt.Println("done syncing")
 
 }
@@ -78,7 +99,7 @@ func main() {
 // them one by one
 // NOTE: Currently we only deal with regular files and symlinks, all others are
 // skipped
-func syncFiles(src, tgt string, fileList <-chan fileInfo, syncDone *sync.WaitGroup) {
+func syncFiles(src, tgt string, fileList <-chan fileInfo, syncDone chan<- syncStats) {
 	var numBytes int64
 	var fileCount int64
 	for file := range fileList {
@@ -114,8 +135,7 @@ func syncFiles(src, tgt string, fileList <-chan fileInfo, syncDone *sync.WaitGro
 		}
 		fileCount++
 	}
-	fmt.Printf("copied %d files and %d bytes\n", fileCount, numBytes)
-	syncDone.Done()
+	syncDone <- syncStats{numFiles: fileCount, numBytes: numBytes}
 }
 
 // syncDirLayout syncs the target directory layout with the provided source layout.
