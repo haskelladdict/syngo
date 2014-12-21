@@ -1,4 +1,5 @@
 syngo
 =====
 
-syngo is a lightweight, concurrent filesystem synchronization tool. 
+syngo is a rsync like filesystem synchronization tool with the ability to
+keep a customizeable amount of back history.
