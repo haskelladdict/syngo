@@ -147,7 +147,7 @@ func checkTgt(tgt string, fileList <-chan fileInfo, updateList chan<- fileInfo,
 			if os.IsNotExist(err) {
 				updateList <- srcFile
 			} else {
-				log.Print("*****", err)
+				log.Print(err)
 			}
 			continue
 		}
@@ -157,10 +157,13 @@ func checkTgt(tgt string, fileList <-chan fileInfo, updateList chan<- fileInfo,
 				// check that link points to the correct file
 				symp, err := filepath.EvalSymlinks(path)
 				if err != nil {
-					log.Print(err)
 					continue
 				}
-				relSymPath := strings.TrimPrefix(symp, tgt+"/")
+				// adjust the sym link path for relative paths
+				relSymPath := symp
+				if !filepath.IsAbs(symp) {
+					relSymPath = strings.TrimPrefix(symp, filepath.Dir(path)+"/")
+				}
 				if relSymPath != srcFile.linkPath {
 					updateList <- srcFile
 				}
@@ -217,7 +220,13 @@ func parseSrcFiles(src string, fileList chan<- fileInfo) {
 				if err != nil {
 					return nil
 				}
-				relSymPath = strings.TrimPrefix(symp, src+"/")
+				// if symlink is absolute path we leave it unchanged otherwise adjust
+				// target path
+				if filepath.IsAbs(symp) {
+					relSymPath = symp
+				} else {
+					relSymPath = strings.TrimPrefix(symp, path.Dir(p)+"/")
+				}
 			}
 			fileList <- fileInfo{info: i, path: relPath, linkPath: relSymPath}
 		}
