@@ -4,7 +4,6 @@ package main
 import (
 	"log"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 )
@@ -19,7 +18,7 @@ func parseSrcDirs(src string, dirList chan<- fileInfo) {
 			return nil
 		}
 
-		relPath := strings.TrimPrefix(p, src)
+		relPath := filepath.Clean(strings.TrimPrefix(p, src))
 		if i.IsDir() {
 			dirList <- fileInfo{info: i, path: relPath}
 		}
@@ -29,7 +28,7 @@ func parseSrcDirs(src string, dirList chan<- fileInfo) {
 }
 
 // parseSrcFiles determined the files that need to be checked for syncing based on
-// the provided src destinations. For now, this simply performs a fime system
+// the provided src location. For now, this simply performs a file system
 // walk starting at src.
 // NOTE: use of filepath.Walk is inefficient for large numbers of files and
 // should be replaced eventually
@@ -40,24 +39,27 @@ func parseSrcFiles(src string, fileList chan<- fileInfo) {
 			return nil
 		}
 
-		relPath := strings.TrimPrefix(p, src+"/")
-		if !i.IsDir() {
-			var relSymPath string
-			if i.Mode()&os.ModeSymlink != 0 {
-				symp, err := filepath.EvalSymlinks(p)
-				if err != nil {
-					return nil
-				}
-				// if symlink is absolute path we leave it unchanged otherwise adjust
-				// target path
-				if filepath.IsAbs(symp) {
-					relSymPath = symp
-				} else {
-					relSymPath = strings.TrimPrefix(symp, path.Dir(p)+"/")
-				}
-			}
-			fileList <- fileInfo{info: i, path: relPath, linkPath: relSymPath}
+		if i.IsDir() {
+			return nil
 		}
+
+		relPath, err := filepath.Rel(src+"/", p)
+		if err != nil {
+			log.Printf("in parseSrcFiles: %s\n", err)
+			return nil
+		}
+
+		// deal with symbolic links
+		var symPath string
+		if i.Mode()&os.ModeSymlink != 0 {
+			symPath, err = os.Readlink(p)
+			if err != nil {
+				log.Printf("++++ in parseSrcFiles: %s\n", err)
+				return nil
+			}
+		}
+
+		fileList <- fileInfo{info: i, path: relPath, linkPath: symPath}
 		return nil
 	})
 	close(fileList)

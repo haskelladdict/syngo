@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 )
 
@@ -38,7 +37,6 @@ func syncFiles(src, tgt string, fileList <-chan fileInfo, syncDone chan<- syncSt
 					continue
 				}
 			}
-
 			linkPath := file.linkPath
 			if err := os.Symlink(linkPath, tgtPath); err != nil {
 				log.Printf("failed to create symbolic link %s to %s: %s\n", tgtPath,
@@ -83,42 +81,40 @@ func checkTgt(tgt string, fileList <-chan fileInfo, updateList chan<- fileInfo,
 			if os.IsNotExist(err) {
 				updateList <- srcFile
 			} else {
-				log.Print(err)
+				log.Printf("in checkTgt: %s\n", err)
 			}
 			continue
 		}
 
-		if srcFile.info.Mode()&os.ModeSymlink != 0 {
-			if info.Mode()&os.ModeSymlink != 0 {
-				// check that link points to the correct file
-				symp, err := filepath.EvalSymlinks(path)
-				if err != nil {
-					continue
-				}
-				// adjust the sym link path for relative paths
-				relSymPath := symp
-				if !filepath.IsAbs(symp) {
-					relSymPath = strings.TrimPrefix(symp, filepath.Dir(path)+"/")
-				}
-				if relSymPath != srcFile.linkPath {
-					updateList <- srcFile
-				}
-			} else {
-				updateList <- srcFile
-			}
-		} else {
+		srcIsSymlink := srcFile.info.Mode()&os.ModeSymlink != 0
+		tgtIsSymlink := info.Mode()&os.ModeSymlink != 0
+
+		// regular files
+		if !srcIsSymlink && !tgtIsSymlink {
 			if (srcFile.info.Size() != info.Size()) ||
 				(srcFile.info.Mode() != info.Mode()) ||
 				(srcFile.info.ModTime() != info.ModTime()) {
 				updateList <- srcFile
 			}
+		} else if srcIsSymlink && tgtIsSymlink {
+			// check that link points to the correct file
+			symPath, err := os.Readlink(path)
+			if err != nil {
+				log.Printf("in checkTgt: %s\n", err)
+				continue
+			}
+			if symPath != srcFile.linkPath {
+				updateList <- srcFile
+			}
+		} else {
+			updateList <- srcFile
 		}
 	}
 	done.Done()
 }
 
 // chanCloser closes the provided fileInfo channel once the provided done channel
-// has delievered the specified number of elements
+// has delivered the specified number of elements
 func chanCloser(fileList chan<- fileInfo, done *sync.WaitGroup) {
 	done.Wait()
 	close(fileList)
@@ -131,6 +127,12 @@ func syncFile(srcPath, tgtPath string, file fileInfo) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("failed to open file %s for syncing: %s\n", srcPath, err)
 	}
+
+	// need to explicitly remove existing files to avoid writing through symbolic
+	// links.
+	// NOTE: For efficiency we simply attempt to remove the file without checking
+	// it it exists
+	os.Remove(tgtPath)
 
 	t, err := os.Create(tgtPath)
 	if err != nil {

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -42,8 +42,16 @@ func main() {
 
 	startTime := time.Now()
 
-	srcTree := path.Clean(strings.TrimSpace(os.Args[1]))
-	tgtTree := path.Clean(strings.TrimSpace(os.Args[2]))
+	srcTree, err := filepath.Abs(filepath.Clean(strings.TrimSpace(os.Args[1])))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	tgtTree, err := filepath.Abs(filepath.Clean(strings.TrimSpace(os.Args[2])))
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	if err := checkInput(srcTree, tgtTree); err != nil {
 		log.Fatal(err)
 	}
@@ -72,8 +80,6 @@ func main() {
 	}
 	go chanCloser(updateList, &done)
 
-	//var syncDone sync.WaitGroup
-	//syncDone.Add(numSyncers)
 	syncDone := make(chan syncStats)
 	for i := 0; i < numSyncers; i++ {
 		go syncFiles(srcTree, tgtTree, updateList, syncDone)
